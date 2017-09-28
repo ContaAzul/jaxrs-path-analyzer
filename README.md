@@ -16,10 +16,10 @@ After that, in your project's pom.xml you have to declare using this plugin, sim
   <version>0.0.1-SNAPSHOT</version>
   <executions>
     <execution>
-      <id>path-analyzer</id>
+      <id>analyze-paths</id>
       <phase>install</phase>
       <goals>
-        <goal>path-analyzer</goal>
+        <goal>analyze-paths</goal>
       </goals>
     </execution>
   </executions>
