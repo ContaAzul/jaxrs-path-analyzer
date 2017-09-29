@@ -9,8 +9,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Map.Entry;
-import java.util.Set;
 
 import org.apache.maven.plugin.AbstractMojo;
 import org.apache.maven.plugin.MojoExecutionException;
@@ -25,7 +23,7 @@ import org.jboss.jandex.Index;
 import org.jboss.jandex.Indexer;
 import org.jboss.jandex.MethodInfo;
 
-@Mojo(name = "path-analyzer", defaultPhase = LifecyclePhase.INSTALL)
+@Mojo(name = "analyze-paths", defaultPhase = LifecyclePhase.INSTALL)
 public class PathAnalyzer extends AbstractMojo {
 
 	@Parameter(defaultValue = "${project.build.directory}", property = "outputDir", required = true)
@@ -39,6 +37,7 @@ public class PathAnalyzer extends AbstractMojo {
 	private static final DotName OPTIONS_ANNOTATION = DotName.createSimple("javax.ws.rs.OPTIONS");
 	private static final DotName HEAD_ANNOTATION = DotName.createSimple("javax.ws.rs.HEAD");
 	private static final DotName PRODUCES_ANNOTATION = DotName.createSimple("javax.ws.rs.Produces");
+	private static final DotName CONSUMES_ANNOTATION = DotName.createSimple("javax.ws.rs.Consumes");
 
 	public void execute() throws MojoExecutionException {
 		try {
@@ -46,9 +45,12 @@ public class PathAnalyzer extends AbstractMojo {
 			URLClassLoader classLoader = getClassLoader(classesDirectory);
 			List<String> classNames = getClassNames(classesDirectory, classesDirectory.getAbsolutePath());
 			analyzeClasses(classLoader, classNames);
-		} catch (Exception e) {
+		} catch (MojoExecutionException e) {
 			getLog().debug(e);
-			throw new MojoExecutionException("Better debug, I don't know what is goin on :(");
+			throw e;
+		} catch (IOException e) {
+			getLog().debug(e);
+			throw new MojoExecutionException("Better debug, I don't know what is goin on :(", e);
 		}
 	}
 
@@ -73,10 +75,8 @@ public class PathAnalyzer extends AbstractMojo {
 			process(paths, className, annotations);
 
 		}
-		Set<String> keySet = paths.keySet();
-		for (String key : keySet) {
+		for (String key : paths.keySet())
 			getLog().debug(key);
-		}
 	}
 
 	private void process(Map<String, String> paths, String className, List<AnnotationInstance> annotations)
@@ -92,13 +92,13 @@ public class PathAnalyzer extends AbstractMojo {
 			if (value != null) {
 				if (annotation.target().kind() != (AnnotationTarget.Kind.CLASS)) {
 					MethodInfo annotatedMethod = annotation.target().asMethod();
-
-					String httpVerb = getHttpVerb(annotatedMethod);
-					String path = pathInClass != null ? pathInClass.concat("/").concat(value.asString())
-							: value.asString();
-					String fullPath = httpVerb != null ? httpVerb + path : path;
-					String producer = getProducer(annotatedMethod);
-					addInPaths(paths, className, producer != null ? producer + " " + fullPath : fullPath);
+					String path = new String();
+					path = addHttpVerb(path, annotatedMethod);
+					path = addProducer(path, annotatedMethod);
+					path = addConsumer(path, annotatedMethod);
+					String fullPath = path.concat(
+							pathInClass != null ? pathInClass.concat("/").concat(value.asString()) : value.asString());
+					addInPaths(paths, className, fullPath);
 				}
 			}
 		}
@@ -116,15 +116,49 @@ public class PathAnalyzer extends AbstractMojo {
 		if (rootAnnotation == null)
 			return;
 		List<MethodInfo> methods = rootAnnotation.target().asClass().methods();
-		for (MethodInfo method : methods) {
-			String httpVerb = getHttpVerb(method);
-			if (httpVerb != null) {
-				String producer = getProducer(method);
-				String annotationValue = getRootPath(rootAnnotation);
-				String path = httpVerb + annotationValue;
-				addInPaths(paths, className, producer != null ? producer + " " + path : path);
+		for (MethodInfo method : methods)
+			if (!containsPathAnnotation(method)) {
+				String httpVerb = getHttpVerb(method);
+				if (httpVerb != null) {
+					String path = httpVerb;
+					path = addProducer(path, method);
+					path = addConsumer(path, method);
+					path = path.concat("/").concat(getRootPath(rootAnnotation));
+					addInPaths(paths, className, path);
+				}
+			}
+	}
+
+	private String addHttpVerb(String path, MethodInfo method) {
+		String httpVerb = getHttpVerb(method);
+		if (httpVerb != null)
+			return httpVerb.concat(path);
+		return path;
+	}
+
+	private String addConsumer(String path, MethodInfo method) {
+		String consumer = getConsumer(method);
+		if (consumer != null)
+			return path.concat(consumer);
+		return path;
+	}
+
+	private String addProducer(String path, MethodInfo method) {
+		String producer = getProducer(method);
+		if (producer != null)
+			return path.concat(producer);
+		return path;
+	}
+
+	private boolean containsPathAnnotation(MethodInfo method) {
+		List<AnnotationInstance> annotations = method.annotations();
+		for (AnnotationInstance annotation : annotations) {
+			DotName annotationName = annotation.name();
+			if (annotationName.equals(PATH_ANNOTATION)) {
+				return true;
 			}
 		}
+		return false;
 	}
 
 	private String getHttpVerb(MethodInfo method) {
@@ -159,29 +193,44 @@ public class PathAnalyzer extends AbstractMojo {
 		List<AnnotationInstance> methodAnnotations = method.annotations();
 		for (AnnotationInstance annotation : methodAnnotations) {
 			DotName annotationName = annotation.name();
-			if (annotationName.equals(PRODUCES_ANNOTATION))
-				return annotation.value().asString();
+			if (annotationName.equals(PRODUCES_ANNOTATION)) {
+				return "PRODUCES(".concat(getValueFromAnnotation(annotation)).concat(") ");
+			}
 
 		}
 		return null;
 	}
 
+	private String getValueFromAnnotation(AnnotationInstance annotation) {
+		return ((AnnotationValue[]) annotation.value().value())[0].asString();
+	}
+
+	private String getConsumer(MethodInfo method) {
+		getLog().debug("Getting producer from method:");
+		getLog().debug(method.name());
+
+		List<AnnotationInstance> methodAnnotations = method.annotations();
+		for (AnnotationInstance annotation : methodAnnotations) {
+			DotName annotationName = annotation.name();
+			if (annotationName.equals(CONSUMES_ANNOTATION))
+				return "CONSUMES(".concat(getValueFromAnnotation(annotation)).concat(") ");
+		}
+		return null;
+	}
+
 	private AnnotationInstance getRootAnnotation(List<AnnotationInstance> annotations) {
-		for (AnnotationInstance annotation : annotations) {
+		for (AnnotationInstance annotation : annotations)
 			if (annotation.target().kind() == (AnnotationTarget.Kind.CLASS))
 				return annotation;
-		}
 		return null;
 	}
 
 	private Index getIndexForClass(URLClassLoader classLoader, String className) throws IOException {
 		Indexer indexer = new Indexer();
 		indexer.index(classLoader.getResourceAsStream(className));
-		Index index = indexer.complete();
-		return index;
+		return indexer.complete();
 	}
 
-	// falta barra entre o valor das anotações
 	private void addInPaths(Map<String, String> paths, String className, String path) throws MojoExecutionException {
 		if (paths.containsKey(path))
 			throw new MojoExecutionException("Double mapping " + path + " from class " + className
@@ -191,14 +240,11 @@ public class PathAnalyzer extends AbstractMojo {
 
 	private void addClassNames(List<String> classNames, File file, String absolutePath) {
 		if (file.isDirectory()) {
-			File[] listFiles = file.listFiles();
-			for (File file2 : listFiles) {
-				addClassNames(classNames, file2, absolutePath);
-			}
+			File[] childFiles = file.listFiles();
+			for (File childFile : childFiles)
+				addClassNames(classNames, childFile, absolutePath);
 		}
-		if (file.isFile() && file.getAbsolutePath().endsWith(".class")) {
+		if (file.isFile() && file.getAbsolutePath().endsWith(".class"))
 			classNames.add(file.getAbsolutePath().replace(absolutePath + "/", ""));
-		}
-
 	}
 }
